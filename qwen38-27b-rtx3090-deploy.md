@@ -1,7 +1,7 @@
 # RTX 3090 单卡部署 Qwen3.8-27B 实战指南（llama.cpp + 推测解码 + 视觉）
 
 > 硬件：RTX 3090 24GB / Ryzen 9 9900X（12C24T）/ 60GB RAM / Ubuntu 22.04 / CUDA 12.x
-> 软件版本：llama.cpp `cc83d7b48`（b10684）
+> 软件版本：llama.cpp `cc83d7b48`（b10684）+ 本地多模态补丁（§7.2，`git pull` 重编译后需重打）
 > 本文所有路径以 `~` 代替用户主目录，端口/参数请按需修改。**不含任何 IP、密钥、密码等敏感信息。**
 
 ---
@@ -16,7 +16,7 @@
 | decode（20K 上下文） | 62~76 tok/s |
 | decode（176K 上下文） | ~42 tok/s |
 | 最大可用上下文 | 256K（KV q4/q4）或 200K（KV 混合精度） |
-| 视觉理解 | ✅ mmproj + `--image-min-tokens 1024` |
+| 视觉理解 | ✅ mmproj + image min/max-tokens（DFlash2 需打 §7.2 补丁） |
 | 空闲显存余量 | 420~830 MiB |
 
 > 期望管理：vLLM 官方基准（DFlash2 greedy ~131 tok/s）是不同框架与精度栈的成绩；
@@ -158,7 +158,8 @@ K 精度比 V 敏感（影响 attention logits），追求质量选混合 K=q8_0
   --spec-draft-type-k q4_0 --spec-draft-type-v q4_0 \
   --spec-type draft-dflash --spec-draft-n-max 4 \
   --flash-attn on \
-  --image-min-tokens 1024 \
+  --image-min-tokens 1024 --image-max-tokens 2048 \
+  --mtmd-batch-max-tokens 8192 \
   --threads 12 --reasoning-effort low
 ```
 
@@ -176,6 +177,9 @@ K 精度比 V 敏感（影响 attention logits），追求质量选混合 K=q8_0
 > 不要用 `-hfd` 指向本地 GGUF 文件（它期望 HF repo id）；
 > `--batch-size` 保持 2048 级别，配推测解码时过小的 batch 会触发
 > `GGML_ASSERT(n_ubatch > n_keep_tail)` 崩溃。
+> `--image-max-tokens 2048`：图像 token 硬上限，超限图自动降采样
+> （DFlash2 草稿缓存兜不住更大的图，见 §7.2）；
+> `--mtmd-batch-max-tokens 8192`：mtmd 编码批次上限，默认 1024，不改则多模态请求 500。
 
 > 安全提示：`--host 0.0.0.0` 会监听所有网卡。若机器暴露在公网/共享网络，
 > 建议加 `--api-key <自定义密钥>` 开启鉴权，或用防火墙限制来源地址。
@@ -209,7 +213,114 @@ K 精度比 V 敏感（影响 attention logits），追求质量选混合 K=q8_0
 
 - `--mmproj` 加载 Q8_0 投影权重，chat 请求 `messages` 里直接放 image（base64 / URL）
 - `--image-min-tokens 1024`：保证高分辨率图不被压成几十个 token（代价是图像占用更多上下文）
+- `--image-max-tokens 2048`：图像 token 硬上限，超限图自动降采样（DFlash2 草稿兜不住更大的图，见 §7.2）
+- `--mtmd-batch-max-tokens 8192`：单次多模态编码批次上限，默认 1024，不改则大图/多图请求 500
 - BF16 mmproj（931MB）在满配下必 OOM，用 Q8_0（629MB）
+- 请求格式：仅支持 OpenAI 风格 `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`，
+  且每个 content 段必须带非空 `text`；anthropic 风格 400、空 text 500
+
+图像 token 数实测（min/max = 1024/2048，mmproj 元数据 image_size=768, patch=16, merge=2）：
+
+| 源图 | 实际 prompt token | 结果 |
+|---|---|---|
+| 512×512 / 1024×1024 | ~1,069 | ✅ |
+| 1920×1080 | 2,085 | ✅ |
+| 2560×1440 / 2048×2048 | 2,025 / 2,070（自动降采样） | ✅ |
+| 不设 max 上限 | ~21K（2048² 源图） | ❌ 失败 |
+
+### 7.1 DFlash2 × 多模态必挂 —— 上游 bug 与本地补丁（重要）
+
+**症状**：只要"正文在前、图片在后"，请求 100% 失败返回 `failed to process mtmd chunk`。
+服务端日志三连：
+
+```
+W find_slot: non-consecutive token position 9122 after 9121 ... with 512 new tokens
+W decode: failed to find a memory slot for batch of size 512
+E process: llama_decode(ctx_dft) failed rc=1 (n_tokens=512, offset=512)
+```
+
+而图片放在最前（位置 0）反而能过——**纯属巧合**：图 token 数恰好塞满草稿缓存环。
+"正文在前必挂、图在前偶尔过"是排查时最大的迷惑项。
+
+**根因**（两层叠加，加调试日志实测确认）：
+
+1. Qwen3.8-VL 对图像 token 做**位置合并**：整张图共享同一个 position。
+   注入草稿的 batch 位置是 `[9122, 9122, 9122, ...]`，不是递增序列
+2. DFlash2 草稿自身 KV 是 **SWA 滚动环**（启动日志 `creating SWA KV cache, size = 2560 cells`
+   = n_swa 2048 + ubatch 512）。同 position 的 cell 永远滑不出 2048 窗口 → 无法淘汰；
+   第一块 512-token 注入侥幸挤出空间后，第二块注入时环已满 → `find_slot` 失败 → 请求 500
+
+**上游状态**：`common/speculative.cpp` dflash `process()` 里留着
+`TODO: revisit after ggml-org/llama.cpp#24669 is merged`，截至最新 master 未修。
+
+**补丁**：让草稿跳过多模态 embedding 注入（文本 token 注入不受影响）。
+编辑 `common/speculative.cpp`，在 `common_speculative_impl_draft_dflash::process()`
+内找到：
+
+```cpp
+        if (has_tokens == has_embeddings) {
+            return true;
+        }
+```
+
+紧随其后插入：
+
+```cpp
+        // [local patch] skip multimodal embedding batches: the DFlash draft's SWA ring
+        // cannot accommodate position-consolidated image tokens (hundreds of cells at
+        // one position never age out of the SWA window), which made llama_decode(ctx_dft)
+        // fail for any image preceded by text. Skipping leaves a context hole in the
+        // draft cache: speculative acceptance degrades for image conversations while
+        // decoding stays correct. Revisit upstream (ggml-org/llama.cpp#24669).
+        if (has_embeddings) {
+            return true;
+        }
+```
+
+自动化打补丁 + 重编译：
+
+```bash
+cd ~/llama.cpp
+cp common/speculative.cpp /tmp/speculative.cpp.bak-dflash-pos   # 留底
+python3 - << 'EOF'
+path = 'common/speculative.cpp'
+src = open(path).read()
+anchor = """        if (has_tokens == has_embeddings) {
+            return true;
+        }"""
+inject = anchor + """
+
+        // [local patch] skip multimodal embedding batches: the DFlash draft's SWA ring
+        // cannot accommodate position-consolidated image tokens (hundreds of cells at
+        // one position never age out of the SWA window), which made llama_decode(ctx_dft)
+        // fail for any image preceded by text. Skipping leaves a context hole in the
+        // draft cache: speculative acceptance degrades for image conversations while
+        // decoding stays correct. Revisit upstream (ggml-org/llama.cpp#24669).
+        if (has_embeddings) {
+            return true;
+        }"""
+assert src.count(anchor) == 1, "anchor not found, llama.cpp version may have changed"
+open(path, 'w').write(src.replace(anchor, inject))
+print("patched")
+EOF
+cmake --build build-allquant --target llama-server -j$(nproc)
+```
+
+**补丁代价**（实测）：
+
+| 场景 | 补丁前 | 补丁后 |
+|---|---|---|
+| 纯文本对话 | DFlash2 全速 | 不变（62→62 tok/s） |
+| 含图对话 decode | 直接报错 | ~40 tok/s（该轮草稿加速失效） |
+| 回答正确性 | — | ✅ 无损（主模型上下文完整） |
+
+原理：跳过注入后草稿缓存留"洞"，含图轮次的推测接受率≈0，自动退化为
+目标模型单独解码；纯文本轮次不受影响。若不能接受含图轮次掉速，
+备选方案是换 `--spec-type draft-mtp`（MTP 草稿复用主模型权重、普通 KV
+无 SWA 环限制，理论无此 bug，未实测）。
+
+**注意**：`git pull` / 重编译会还原源文件，补丁需重打。建议把上面的
+自动化脚本存成 `~/llama.cpp/dflash-mm-patch.sh` 方便复用。
 
 ---
 
@@ -225,6 +336,10 @@ K 精度比 V 敏感（影响 attention logits），追求质量选混合 K=q8_0
 8. KV 量化必须开 `--flash-attn on`；量化 V cache 精度别乱降（q4_0 V 必须搭配正确的 FA 内核）
 9. 服务静默退出是常见现象，重启后务必 `ps` + `curl /v1/models` 双确认再开测
 10. 电源：单 3090 推理实测 ~150W，原电源够用；加第二张 3090 建议 1200W+
+11. DFlash2 + 图片（正文在前）必挂：图像位置合并 × 草稿 SWA 环无法淘汰同位置 cell
+    → 打 §7.1 补丁；"图放最前能过"是撞上缓存环容量的巧合，别依赖
+12. 客户端/代理层报错不可信（错误码可能被替换成请求 ID），真实原因以服务端日志为准
+    （如 `failed to process mtmd chunk, res = -1`），配合 `--verbose` 看 `find_slot` 警告定位
 
 ---
 
