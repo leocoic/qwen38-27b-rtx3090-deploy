@@ -182,6 +182,21 @@ MTP 长输出全面略优。DFlash2 仅 176K short 一点领先。
 （agent 高频路径）优势最大。代理网关会原样透传 llama-server 的 `timings`
 与 `draft_n/draft_n_accepted` 字段，链路级 A/B 可直接复用本文方法。
 
+**Q4_K_M 主模型复测**（生产链路、同 payload、180K ctx；UD-Q4_K_M 实测
+仅 15.3 GB，与 Q4_K_S 几乎同体积，装 200K 也够）：
+
+| 配置 | 空闲显存 | 短 prompt decode | 10K decode | 流式 150 tok |
+|---|---|---|---|---|
+| MTP + Q4_K_S @200K（线上） | 482 MiB | **60.3 tok/s（43%）** | **49.5 tok/s（33%）** | **2.5s** |
+| MTP + Q4_K_M @180K | 480 MiB | 51.1 tok/s（35%） | 47.3 tok/s（33%） | 2.85s |
+| DFlash2 + Q4_K_S @200K | 524 MiB | 39.8 tok/s（18%） | 39.9 tok/s（20%） | 3.2s |
+| DFlash2 + Q4_K_M @180K | 374 MiB | 37.3 tok/s（18%） | 35.5 tok/s（17%） | 3.9s |
+
+结论：**Q4_K_M 未复现历史 +3~5% 优势，反而略慢**（MTP 短 prompt -15%，
+伴随 MTP 头量化差异导致的接受率下降 43%→35%；DFlash2 同趋势）。两种引擎
+下 Q4_K_S 都是更优选择，维持 Q4_K_S + MTP + 200K 为最终配置。
+注：历史"+3~5%"是 DFlash2 + 150K ctx + 不同 payload 下的结果，不代表本配置。
+
 ---
 
 ## 5. 最终启动脚本
