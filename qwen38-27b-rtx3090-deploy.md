@@ -1,7 +1,7 @@
 # RTX 3090 单卡部署 Qwen3.8-27B 实战指南（llama.cpp + 推测解码 + 视觉）
 
 > 硬件：RTX 3090 24GB / Ryzen 9 9900X（12C24T）/ 60GB RAM / Ubuntu 22.04 / CUDA 12.x
-> 软件版本：llama.cpp `cc83d7b48`（b10684）+ 本地多模态补丁（§7.2，`git pull` 重编译后需重打）
+> 软件版本：llama.cpp `cc83d7b48`（b10684）+ 本地多模态补丁（§7.1，`git pull` 重编译后需重打）
 > 本文所有路径以 `~` 代替用户主目录，端口/参数请按需修改。**不含任何 IP、密钥、密码等敏感信息。**
 
 ---
@@ -16,7 +16,7 @@
 | decode（20K 上下文） | 62~76 tok/s |
 | decode（176K 上下文） | ~42 tok/s |
 | 最大可用上下文 | 256K（KV q4/q4）或 200K（KV 混合精度） |
-| 视觉理解 | ✅ mmproj + image min/max-tokens（DFlash2 需打 §7.2 补丁） |
+| 视觉理解 | ✅ mmproj + image min/max-tokens（DFlash2 需打 §7.1 补丁） |
 | 空闲显存余量 | 420~830 MiB |
 
 > 期望管理：vLLM 官方基准（DFlash2 greedy ~131 tok/s）是不同框架与精度栈的成绩；
@@ -178,7 +178,7 @@ K 精度比 V 敏感（影响 attention logits），追求质量选混合 K=q8_0
 > `--batch-size` 保持 2048 级别，配推测解码时过小的 batch 会触发
 > `GGML_ASSERT(n_ubatch > n_keep_tail)` 崩溃。
 > `--image-max-tokens 2048`：图像 token 硬上限，超限图自动降采样
-> （DFlash2 草稿缓存兜不住更大的图，见 §7.2）；
+> （DFlash2 草稿缓存兜不住更大的图，见 §7.1）；
 > `--mtmd-batch-max-tokens 8192`：mtmd 编码批次上限，默认 1024，不改则多模态请求 500。
 
 > 安全提示：`--host 0.0.0.0` 会监听所有网卡。若机器暴露在公网/共享网络，
@@ -213,7 +213,7 @@ K 精度比 V 敏感（影响 attention logits），追求质量选混合 K=q8_0
 
 - `--mmproj` 加载 Q8_0 投影权重，chat 请求 `messages` 里直接放 image（base64 / URL）
 - `--image-min-tokens 1024`：保证高分辨率图不被压成几十个 token（代价是图像占用更多上下文）
-- `--image-max-tokens 2048`：图像 token 硬上限，超限图自动降采样（DFlash2 草稿兜不住更大的图，见 §7.2）
+- `--image-max-tokens 2048`：图像 token 硬上限，超限图自动降采样（DFlash2 草稿兜不住更大的图，见 §7.1）
 - `--mtmd-batch-max-tokens 8192`：单次多模态编码批次上限，默认 1024，不改则大图/多图请求 500
 - BF16 mmproj（931MB）在满配下必 OOM，用 Q8_0（629MB）
 - 请求格式：仅支持 OpenAI 风格 `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`，
