@@ -168,6 +168,20 @@ decode 速度与接受率同步波动（93% → 98 tok/s，45% → 59 tok/s）�
 结论：**多模态部署选 MTP**（图文通吃且免补丁）；纯文本部署两者皆可，
 MTP 长输出全面略优。DFlash2 仅 176K short 一点领先。
 
+**生产链路复测**（经 Trae 同款代理链路：网关 → sidecar → GPU :8000，
+同一组 payload、同一会话内切引擎 A/B，纯文本、温度 0）：
+
+| 场景 | DFlash2（+§7.1 补丁） | MTP | 差距 |
+|---|---|---|---|
+| 短 prompt decode（300 tok 输出） | 39.8 tok/s（接受率 18%） | 60.3 tok/s（43%） | **MTP +51%** |
+| 10K 上下文 decode（300 tok 输出） | 39.9 tok/s（20%） | 49.5 tok/s（33%） | **MTP +24%** |
+| 10K 流式 150 tok 总耗时（455 chunks） | 3.2s | 2.5s | MTP 快 22% |
+| 客户端完整请求 wall（10K + 300 tok） | 8.0s | 6.5s | MTP 快 19% |
+
+结论：走生产链路结论不变——**纯文本也是 MTP 全面占优**，且短 prompt 场景
+（agent 高频路径）优势最大。代理网关会原样透传 llama-server 的 `timings`
+与 `draft_n/draft_n_accepted` 字段，链路级 A/B 可直接复用本文方法。
+
 ---
 
 ## 5. 最终启动脚本
