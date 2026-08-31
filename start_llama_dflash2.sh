@@ -13,7 +13,7 @@
 #   bash ~/下载/start_llama_mtp.sh                # 启动
 #   bash ~/下载/start_llama_mtp.sh --threads 8    # 追加参数
 #
-# 日志:   /home/yang-ubuntu/llama_mtp.log  (实时看: tail -f 该文件)
+# 日志:   ~/llama_dflash2.log  (实时看: tail -f 该文件)
 # 停止:   pkill -x llama-server
 #
 # 说明:
@@ -27,16 +27,16 @@
 set -u
 
 # ---- 路径 ----
-MODEL=/home/yang-ubuntu/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_S.gguf
-DRAFT=/home/yang-ubuntu/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
-MMPROJ=/home/yang-ubuntu/models/Qwen3.8-27B-GGUF/mmproj-Q8_0.gguf
-BIN=/home/yang-ubuntu/llama.cpp/build-allquant/bin/llama-server
-LOG=/home/yang-ubuntu/llama_dflash2.log
-PIDF=/home/yang-ubuntu/llama_dflash2.pid
+MODEL=$HOME/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_S.gguf
+DRAFT=$HOME/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
+MMPROJ=$HOME/models/Qwen3.8-27B-GGUF/mmproj-Q8_0.gguf
+BIN=$HOME/llama.cpp/build-allquant/bin/llama-server
+LOG=$HOME/llama_dflash2.log
+PIDF=$HOME/llama_dflash2.pid
 
 # ---- 环境 ----
 export PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export LD_LIBRARY_PATH=/home/yang-ubuntu/llama.cpp/build-allquant/bin:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/llama.cpp/build-allquant/bin:${LD_LIBRARY_PATH:-}
 export LLAMA_ARG_FIT=0
 
 # ---- 检查文件 ----
