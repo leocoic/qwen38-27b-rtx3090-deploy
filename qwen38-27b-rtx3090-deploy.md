@@ -16,7 +16,7 @@
 | decode（20K 上下文） | 62~76 tok/s |
 | decode（176K 上下文） | ~42 tok/s |
 | 最大可用上下文 | 256K（KV q4/q4）或 200K（KV 混合精度） |
-| 视觉理解 | ✅ mmproj + image min/max-tokens（DFlash2 需打 §7.1 补丁） |
+| 视觉理解 | ✅ mmproj + image min/max-tokens（推荐 MTP 版免补丁；DFlash2 版需打 §7.1 补丁） |
 | 空闲显存余量 | 420~830 MiB |
 
 > 期望管理：vLLM 官方基准（DFlash2 greedy ~131 tok/s）是不同框架与精度栈的成绩；
@@ -201,27 +201,43 @@ MTP 长输出全面略优。DFlash2 仅 176K short 一点领先。
 
 ## 5. 最终启动脚本
 
+本仓库收录两份生产启动脚本（统一结构：启动前清理 + 就绪健康检查 + sanity 请求）：
+
+| 文件 | 配置 | 说明 |
+|---|---|---|
+| `start_llama_mtp.sh` | MTP（**推荐，当前线上**） | 免补丁，图文通吃 |
+| `start_llama_dflash2.sh` | DFlash2（备选） | 需先打 §7.1 补丁（脚本头部有警告） |
+
+脚本结构（两版相同，约 110 行）：
+
+1. 文件检查（模型 / 草稿 / mmproj / 二进制缺失即退出）
+2. `pkill -9 -x llama-server` 精确匹配 + **VRAM 与端口双条件等待释放**
+   （只等显存会在竞态下让新实例撞端口 `couldn't bind HTTP server socket`，
+   健康检查误报"进程已死"）
+3. `nohup` 启动 + PID 入 pid 文件
+4. 加载等待（每 5s，最多 120s；检测死进程并 grep 日志找失败原因）
+5. 就绪检查（/v1/models）+ 自动 sanity 请求（max_tokens=10）
+6. `"$@"` 支持追加参数：`bash start_llama_mtp.sh --log-verbosity 2`
+
+MTP 版核心命令（DFlash2 版仅多 `--model-draft` 与 `--spec-type draft-dflash` 两处）：
+
 ```bash
-#!/bin/bash
-# start_llama_dflash2.sh —— Q4_K_S + DFlash2 + 视觉 + 200K ctx + 混合 KV
-~/llama.cpp/build-allquant/bin/llama-server \
-  -m  ~/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_S.gguf \
-  --model-draft ~/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  --mmproj ~/models/Qwen3.8-27B-GGUF/mmproj-Q8_0.gguf \
-  --port 8000 --host 0.0.0.0 \
-  --ctx-size 204800 \
+llama-server \
+  --model   ~/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_S.gguf \
+  --mmproj  ~/models/Qwen3.8-27B-GGUF/mmproj-Q8_0.gguf \
+  --host 0.0.0.0 --port 8000 --ctx-size 204800 \
   --n-gpu-layers 99 --parallel 1 \
   --batch-size 2048 --ubatch-size 512 \
   --cache-type-k q8_0 --cache-type-v q4_0 \
   --spec-draft-type-k q4_0 --spec-draft-type-v q4_0 \
-  --spec-type draft-dflash --spec-draft-n-max 4 \
+  --spec-type draft-mtp --spec-draft-n-max 4 \
   --flash-attn on \
   --image-min-tokens 1024 --image-max-tokens 2048 \
   --mtmd-batch-max-tokens 8192 \
   --threads 12 --reasoning-effort low
 ```
 
-**显存预算**（200K ctx，实测空闲 23,601 MiB）：
+**显存预算**（200K ctx，实测空闲 MTP 23,643 / DFlash2 23,601 MiB）：
 
 | 项 | 占用 |
 |---|---|
@@ -241,10 +257,6 @@ MTP 长输出全面略优。DFlash2 仅 176K short 一点领先。
 
 > 安全提示：`--host 0.0.0.0` 会监听所有网卡。若机器暴露在公网/共享网络，
 > 建议加 `--api-key <自定义密钥>` 开启鉴权，或用防火墙限制来源地址。
-
-> **当前线上运行 MTP 版**（`start_llama_mtp.sh`）：与上方 DFlash2 版仅两处不同——
-> `--spec-type draft-mtp`、删去 `--model-draft` 行，其余参数逐字相同。
-> 选型依据见 §4 对决表；显存预算基本不变（23,643 vs 23,601 MiB）。
 
 ---
 
@@ -437,6 +449,7 @@ EOF
 8. KV 量化必须开 `--flash-attn on`；量化 V cache 精度别乱降（q4_0 V 必须搭配正确的 FA 内核）
 9. 服务静默退出是常见现象，重启后务必 `ps` + `curl /v1/models` 双确认再开测
 10. 电源：单 3090 推理实测 ~150W，原电源够用；加第二张 3090 建议 1200W+
+11. 重启脚本杀进程后必须等 **VRAM 与端口双条件**释放再启动：只等显存会留竞态窗口，新实例 `couldn't bind HTTP server socket, port: 8000` 直接退出，健康检查误报"进程已死"（§5）
 11. DFlash2 + 图片（正文在前）必挂：图像位置合并 × 草稿 SWA 环无法淘汰同位置 cell
     → 打 §7.1 补丁；"图放最前能过"是撞上缓存环容量的巧合，别依赖
 12. 客户端/代理层报错不可信（错误码可能被替换成请求 ID），真实原因以服务端日志为准
