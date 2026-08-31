@@ -254,6 +254,25 @@ E process: llama_decode(ctx_dft) failed rc=1 (n_tokens=512, offset=512)
 `TODO: revisit after ggml-org/llama.cpp#24669 is merged`，截至最新 master 未修。
 
 **补丁**：让草稿跳过多模态 embedding 注入（文本 token 注入不受影响）。
+补丁完整内容见本仓库的 **`dflash-mm.patch`**（对 llama.cpp `cc83d7b48` 生成，
+`git apply --check` 校验通过）：在 `common/speculative.cpp` 的
+`common_speculative_impl_draft_dflash::process()` 内、`if (has_tokens == has_embeddings)`
+判断之后新增 `if (has_embeddings) { return true; }`（含注释共 10 行）。
+
+**方式一（推荐）：git apply 补丁文件**
+
+```bash
+cd ~/llama.cpp
+cp /path/to/repo/dflash-mm.patch ./
+cp common/speculative.cpp /tmp/speculative.cpp.bak-dflash-pos   # 留底
+git apply --check dflash-mm.patch && git apply dflash-mm.patch
+cmake --build build-allquant --target llama-server -j$(nproc)
+```
+
+`--check` 失败说明 llama.cpp 版本差异过大（hunk 上下文对不上），改用方式二。
+
+**方式二：手工/脚本插入**
+
 编辑 `common/speculative.cpp`，在 `common_speculative_impl_draft_dflash::process()`
 内找到：
 
@@ -277,11 +296,10 @@ E process: llama_decode(ctx_dft) failed rc=1 (n_tokens=512, offset=512)
         }
 ```
 
-自动化打补丁 + 重编译：
+python 脚本版（anchor 断言，版本变了会报错而不是打歪）：
 
 ```bash
 cd ~/llama.cpp
-cp common/speculative.cpp /tmp/speculative.cpp.bak-dflash-pos   # 留底
 python3 - << 'EOF'
 path = 'common/speculative.cpp'
 src = open(path).read()
@@ -289,13 +307,6 @@ anchor = """        if (has_tokens == has_embeddings) {
             return true;
         }"""
 inject = anchor + """
-
-        // [local patch] skip multimodal embedding batches: the DFlash draft's SWA ring
-        // cannot accommodate position-consolidated image tokens (hundreds of cells at
-        // one position never age out of the SWA window), which made llama_decode(ctx_dft)
-        // fail for any image preceded by text. Skipping leaves a context hole in the
-        // draft cache: speculative acceptance degrades for image conversations while
-        // decoding stays correct. Revisit upstream (ggml-org/llama.cpp#24669).
         if (has_embeddings) {
             return true;
         }"""
@@ -303,7 +314,6 @@ assert src.count(anchor) == 1, "anchor not found, llama.cpp version may have cha
 open(path, 'w').write(src.replace(anchor, inject))
 print("patched")
 EOF
-cmake --build build-allquant --target llama-server -j$(nproc)
 ```
 
 **补丁代价**（实测）：
@@ -319,8 +329,8 @@ cmake --build build-allquant --target llama-server -j$(nproc)
 备选方案是换 `--spec-type draft-mtp`（MTP 草稿复用主模型权重、普通 KV
 无 SWA 环限制，理论无此 bug，未实测）。
 
-**注意**：`git pull` / 重编译会还原源文件，补丁需重打。建议把上面的
-自动化脚本存成 `~/llama.cpp/dflash-mm-patch.sh` 方便复用。
+**注意**：`git pull` / 重编译会还原源文件，补丁需重打。重打前先
+`git apply --reverse --check dflash-mm.patch` 判断是否已打过（报错=未打）。
 
 ---
 

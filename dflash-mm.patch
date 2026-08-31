@@ -1,0 +1,21 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index d34d1c9c5..c7c7fd5dc 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1106,6 +1106,16 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+             return true;
+         }
+ 
++        // [local patch] skip multimodal embedding batches: the DFlash draft's SWA ring
++        // cannot accommodate position-consolidated image tokens (hundreds of cells at
++        // one position never age out of the SWA window), which made llama_decode(ctx_dft)
++        // fail for any image preceded by text. Skipping leaves a context hole in the
++        // draft cache: speculative acceptance degrades for image conversations while
++        // decoding stays correct. Revisit upstream (ggml-org/llama.cpp#24669).
++        if (has_embeddings) {
++            return true;
++        }
++
+         const int32_t n_tokens = batch_in.n_tokens;
+ 
+         // per-seq inclusive batch range (assumes each seq's tokens are contiguous in the batch)
